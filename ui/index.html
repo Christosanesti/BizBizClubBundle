@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>گیم سنتر — دفتر روزانه</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="preload">
+
+<!-- ═══ ambient background ═══ -->
+<div class="bg" aria-hidden="true">
+  <div class="bg-grid"></div>
+  <div class="glow g1"></div>
+  <div class="glow g2"></div>
+  <div class="glow g3"></div>
+  <div class="vignette"></div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6.2 8.5h11.6c1.9 0 2.9 1.3 3.2 3l.8 4.4c.3 1.7-.5 2.6-1.6 2.6-1 0-1.5-.6-2.2-1.5l-.9-1.2H6.9l-.9 1.2c-.7.9-1.2 1.5-2.2 1.5-1.1 0-1.9-.9-1.6-2.6l.8-4.4c.3-1.7 1.3-3 3.2-3Z"/>
+        <path d="M7.5 12v3M6 13.5h3"/><circle cx="15.6" cy="12.6" r=".9" fill="currentColor"/><circle cx="17.6" cy="14.6" r=".9" fill="currentColor"/>
+      </svg>
+    </div>
+    <div class="brand-txt">
+      <h1 id="shopName">گیم سنتر</h1>
+      <div class="sub">
+        <span id="todayLabel">—</span>
+        <span class="sep">◆</span>
+        <span class="clock" id="clockNow">۰۰:۰۰</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat hi">
+      <div class="stat-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v20M17 6.5C17 4.6 14.8 3.5 12 3.5S7 4.6 7 6.5s2.2 3 5 3.5 5 1.4 5 3.5-2.2 3-5 3-5-1.1-5-3"/></svg>
+      </div>
+      <div>
+        <span class="k">درآمد امروز</span>
+        <span class="v money" id="statTotal">۰</span>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>
+      </div>
+      <div>
+        <span class="k">تعداد مشتری</span>
+        <span class="v" id="statCount">۰</span>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="12" rx="2.5"/><path d="M8 20h8M12 16v4"/></svg>
+      </div>
+      <div>
+        <span class="k">دستگاه فعال</span>
+        <span class="v" id="statBusy">۰</span>
+      </div>
+    </div>
+  </div>
+
+  <nav class="actions">
+    <button class="btn ghost" id="btnManual">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      ثبت دستی
+    </button>
+    <button class="btn ghost" id="btnArchive">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H9l2 2.5h7.5A1.5 1.5 0 0 1 20 8v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18Z"/></svg>
+      دفتر روزها
+    </button>
+    <button class="btn ghost" id="btnSettings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg>
+      تنظیمات
+    </button>
+    <button class="btn warn" id="btnCloseDay">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h6l1.5 2.5h5L18 13h2a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Z"/><path d="M8 8.5 12 4l4 4.5"/></svg>
+      بستن روز
+    </button>
+  </nav>
+</header>
+
+<div class="stale" id="staleBar" hidden>
+  <span class="stale-ico">⚠</span>
+  <span>حساب روز قبل هنوز بسته نشده است.</span>
+  <button class="btn small" id="btnCloseStale">بستن روز قبل</button>
+</div>
+
+<section class="consoles" id="consoles"></section>
+
+<main class="lower">
+  <section class="panel log-panel">
+    <div class="panel-head">
+      <h2>حساب‌های امروز <span class="chip" id="logCount">۰</span></h2>
+      <div class="panel-head-actions">
+        <button class="btn tiny ghost" id="btnCsv">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
+          خروجی Excel
+        </button>
+        <button class="btn tiny ghost" id="btnPrint">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M7 8V3h10v5"/><rect x="3" y="8" width="18" height="8" rx="2"/><path d="M7 13h10v8H7z"/></svg>
+          چاپ
+        </button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="log">
+        <thead>
+          <tr>
+            <th>#</th><th>دستگاه</th><th>شروع</th><th>پایان</th><th>مدت</th>
+            <th>دسته</th><th>هزینه بازی</th><th>نوشیدنی</th><th>جمع</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="logBody"></tbody>
+      </table>
+      <div class="empty" id="logEmpty">
+        <div class="empty-ico" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2" y="5" width="20" height="11" rx="2.5"/><path d="M8 8.5v2M6.5 9.5h3M15.5 9h.01M17.5 11h.01"/><path d="M7 20h10"/></svg>
+        </div>
+        <p>هنوز حسابی ثبت نشده است.</p>
+        <span>برای شروع، روی «شروع بازی» یکی از دستگاه‌ها بزنید.</span>
+      </div>
+    </div>
+    <footer class="log-foot">
+      <div class="fo"><span class="k">جمع بازی</span><span class="v money" id="footPlay">۰</span></div>
+      <div class="fo"><span class="k">جمع نوشیدنی</span><span class="v money" id="footItems">۰</span></div>
+      <div class="fo grand"><span class="k">جمع کل روز</span><span class="v money" id="footTotal">۰</span></div>
+    </footer>
+  </section>
+
+  <aside class="panel side-panel">
+    <div class="panel-head"><h2>فروش نوشیدنی</h2></div>
+    <div id="drinkStats" class="drink-stats"></div>
+    <div class="hint">
+      <b>میان‌بُرها</b>
+      <p>کلیدهای <kbd>۱</kbd> تا <kbd>۴</kbd> دستگاه را شروع/تسویه می‌کنند و <kbd>Esc</kbd> پنجره‌ها را می‌بندد.</p>
+    </div>
+    <div class="hint">
+      <b>محل ذخیره</b>
+      <p class="path" id="dataPath">—</p>
+    </div>
+  </aside>
+</main>
+
+<!-- ═══ modal ═══ -->
+<div class="overlay" id="overlay" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="modalTitle">—</h3>
+      <button class="x" id="modalClose" aria-label="بستن">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<div id="printArea" aria-hidden="true"></div>
+
+<script src="vendor/gsap.min.js"></script>
+<script src="vendor/confetti.min.js"></script>
+<script src="billing.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

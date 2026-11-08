@@ -1,0 +1,84 @@
+name: build-windows-exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      - name: Money & bookkeeping tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Build GameCenter.exe
+        run: python -m PyInstaller --clean --noconfirm packaging/gamecenter.spec
+
+      - name: Smoke test the built exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:GAMECENTER_DATA = Join-Path $env:RUNNER_TEMP 'gc-data'
+          $exe = Join-Path $PWD 'dist\GameCenter.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--port','8899','--no-open' -PassThru
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                if ((Invoke-RestMethod 'http://127.0.0.1:8899/api/ping' -TimeoutSec 2).ok) { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw 'the exe did not answer /api/ping' }
+
+            $ui = Invoke-WebRequest 'http://127.0.0.1:8899/' -UseBasicParsing -TimeoutSec 5
+            if ($ui.StatusCode -ne 200 -or $ui.Content -notmatch 'billing\.js') { throw 'UI not served from the bundle' }
+            $js = Invoke-WebRequest 'http://127.0.0.1:8899/billing.js' -UseBasicParsing -TimeoutSec 5
+            if ($js.Content -notmatch 'GCBilling') { throw 'billing.js missing from the bundle' }
+
+            $start = Invoke-RestMethod 'http://127.0.0.1:8899/api/start' -Method Post -ContentType 'application/json' -Body '{"console":"1","handles":2}' -TimeoutSec 5
+            if ($start.running.'1'.rate -ne 100000) { throw "rate snapshot wrong: $($start.running.'1'.rate)" }
+
+            Start-Sleep -Seconds 2
+            $stop = Invoke-RestMethod 'http://127.0.0.1:8899/api/stop' -Method Post -ContentType 'application/json' -Body '{"console":"1","items":[{"name":"Cola","price":30000,"qty":2}],"op_id":"ci-smoke"}' -TimeoutSec 5
+            $s = $stop.session
+            if ($s.total -ne ($s.play + $s.items_total)) { throw 'row total is not play + items' }
+            if ($s.items_total -ne 60000) { throw "item total wrong: $($s.items_total)" }
+            if ($s.minutes -ne 5) { throw "billed minutes wrong: $($s.minutes)" }
+            if ($s.play -ne 8333) { throw "play cost wrong: $($s.play)" }
+            Write-Host "smoke ok -> minutes=$($s.minutes) play=$($s.play) items=$($s.items_total) total=$($s.total)"
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Keep the exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameCenter-windows
+          path: dist/GameCenter.exe
+          if-no-files-found: error
+
+      - name: Attach the exe to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GameCenter.exe
+          body: |
+            فایل اجرایی ویندوز — بدون نیاز به نصب پایتون.
+            دانلود، اجرا با دوبار کلیک. راهنما: README.md
