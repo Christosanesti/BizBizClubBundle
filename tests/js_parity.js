@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /* Reads billing cases as JSON on stdin, prints the UI's answer for each.
-   tests/test_billing.py feeds the same cases to billing.py and compares. */
+   tests/test_billing.py feeds the same cases to billing.py and compares.
+
+   The output is escaped to pure ASCII on purpose: the Python side decodes this
+   with the machine's locale, and a Windows runner is not UTF-8 by default.
+   Persian digits must not depend on the console code page. */
 'use strict';
 
 const fs = require('fs');
@@ -19,4 +23,9 @@ const out = cases.map((c) => {
     fmtMinutes: B.fmtMinutes(b.minutes),
   };
 });
-process.stdout.write(JSON.stringify(out));
+
+const ascii = JSON.stringify(out).replace(
+  /[\u0080-\uffff]/g,
+  (ch) => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'),
+);
+process.stdout.write(ascii);

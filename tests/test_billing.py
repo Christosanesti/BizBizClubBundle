@@ -191,7 +191,8 @@ class JavaScriptParityTests(unittest.TestCase):
         if cls.node:
             proc = subprocess.run(
                 [cls.node, str(ROOT / "tests" / "js_parity.js")],
-                input=json.dumps(cls.cases), capture_output=True, text=True, timeout=120,
+                input=json.dumps(cls.cases),  # ensure_ascii=True → pure ASCII
+                capture_output=True, encoding="utf-8", errors="replace", timeout=120,
             )
             if proc.returncode != 0:
                 raise AssertionError(f"node failed: {proc.stderr}")
@@ -219,7 +220,11 @@ class JavaScriptParityTests(unittest.TestCase):
                 want = want.rstrip("0").rstrip(".")
             want = want.replace(".", "٫")
             want = "".join("۰۱۲۳۴۵۶۷۸۹"[int(c)] if c.isdigit() else c for c in want)
-            self.assertEqual(js["fmtMinutes"], want, f"fmtMinutes {case}")
+            self.assertEqual(
+                js["fmtMinutes"], want,
+                f"fmtMinutes {case} — js={[hex(ord(c)) for c in js['fmtMinutes']]} "
+                f"py={[hex(ord(c)) for c in want]}",
+            )
 
 
 # ══════════════════════════════════════════════════════ 3. the book
