@@ -102,11 +102,17 @@ function setStepper(node, value) {
 }
 
 /* ── billing — the same math as billing.py, never a local copy ── */
-const { bill: billFor, fmtMinutes } = GCBilling;
+const { bill: billFor, billPlan, fmtMinutes } = GCBilling;
 
 /* the wall clock a running session is measured with (ms, server stamped) */
 const runStartMs = (run) => Number(run && (run.start_ms ?? Date.parse(run.start))) || 0;
 const runSeconds = (run, atMs = Date.now()) => Math.max(0, (atMs - runStartMs(run)) / 1000);
+/* billing legs of a running session — the last leg is still open */
+const runLegs = (run) => {
+  const legs = run && Array.isArray(run.legs) && run.legs.length ? run.legs
+    : [{ from_ms: runStartMs(run), mode: run && run.mode, handles: run && run.handles, rate: run && run.rate }];
+  return legs.map((l) => ({ ...l, from_ms: Number(l.from_ms) || 0, rate: Number(l.rate) || 0 }));
+};
 
 /* one id per settle attempt, so a retried request cannot bill twice */
 const uid = () => (window.crypto && crypto.randomUUID
@@ -145,8 +151,39 @@ function tweenNumber(node, to, opt = {}) {
 
 /* ── state ── */
 let S = null;
-const handleSel = JSON.parse(localStorage.getItem('gc-handles') || '{}');
-CONSOLES.forEach((c) => { if (!handleSel[c]) handleSel[c] = 2; });
+/* per-console plan: {mode:'local'|'plus', handles:1-4} — Plus is online play,
+   billed at settings.plus_rate instead of the controller rate */
+const planSel = JSON.parse(localStorage.getItem('gc-plan') || '{}');
+const legacyHandles = JSON.parse(localStorage.getItem('gc-handles') || '{}');
+CONSOLES.forEach((c) => {
+  const p = planSel[c];
+  if (!p || typeof p !== 'object') {
+    planSel[c] = { mode: 'local', handles: Number(legacyHandles[c]) || 2 };
+  } else if (p.mode !== 'plus' && !(p.handles >= 1 && p.handles <= 4)) {
+    p.handles = 2;
+  }
+});
+const savePlanSel = () => localStorage.setItem('gc-plan', JSON.stringify(planSel));
+
+/* PlayStation logo (simple-icons, CC0) — marks the online/Plus plan */
+const PS_ICON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8.984 2.596v17.547l3.915 1.261V6.688c0-.69.304-1.151.794-.991.636.18.76.814.76 1.505v5.875c2.441 1.193 4.362-.002 4.362-3.152 0-3.237-1.126-4.675-4.438-5.827-1.307-.448-3.728-1.186-5.39-1.502zm4.656 16.241l6.296-2.275c.715-.258.826-.625.246-.818-.586-.192-1.637-.139-2.357.123l-4.205 1.5V14.98l.24-.085s1.201-.42 2.913-.615c1.696-.18 3.785.03 5.437.661 1.848.601 2.04 1.472 1.576 2.072-.465.6-1.622 1.036-1.622 1.036l-8.544 3.107V18.86zM1.807 18.6c-1.9-.545-2.214-1.668-1.352-2.32.801-.586 2.16-1.052 2.16-1.052l5.615-2.013v2.313L4.205 17c-.705.271-.825.632-.239.826.586.195 1.637.15 2.343-.12L8.247 17v2.074c-.12.03-.256.044-.39.073-1.939.331-3.996.196-6.038-.479z"/></svg>';
+
+/* what a session row / running session is called in the 'حالت' column */
+const planRowLabel = (s) => {
+  const segs = Array.isArray(s && s.segments) ? s.segments : [];
+  if (!segs.length) return `${fa((s && s.handles) || 1)} دسته`;
+  const parts = [];
+  segs.forEach((g) => {
+    const l = g && g.mode === 'plus' ? 'Plus' : `${fa((g && g.handles) || 1)} دسته`;
+    if (!parts.includes(l)) parts.push(l);
+  });
+  return parts.join(' + ');
+};
+const runPlanLabel = (run) => (run && run.mode === 'plus' ? 'Plus' : `${fa((run && run.handles) || 1)} دسته`);
+/* hourly rate a plan selection would bill at, from live settings */
+const selRate = (sel, st) => (sel.mode === 'plus'
+  ? Number(st.plus_rate || 0)
+  : Number(st.rates[String(sel.handles)] || 0));
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, html) => {
@@ -371,7 +408,7 @@ function renderLog(opts = {}) {
       <td class="time">${fmtClock(s.start)}</td>
       <td class="time">${fmtClock(s.end)}</td>
       <td>${fmtDur(s.seconds)}</td>
-      <td class="num">${fa(s.handles)} دسته</td>
+      <td class="num">${planRowLabel(s)}</td>
       <td class="num">${fmtMoney(s.play)}</td>
       <td class="num" title="${itemList.replace(/"/g, '&quot;')}">${s.items_total ? fmtMoney(s.items_total) : '—'}</td>
       <td class="num total">${fmtMoney(s.total)}</td>
@@ -452,11 +489,28 @@ function syncCards(opts = {}) {
     const card = consolesEl.querySelector(`.card[data-c="${c}"]`);
     if (!card) return;
     const run = S.running[c];
-    const h = handleSel[c];
-    const rate = Number(st.rates[String(h)] || 0);
+    const sel = planSel[c] || { mode: 'local', handles: 2 };
+    const isPlus = sel.mode === 'plus';
+    const rate = selRate(sel, st);
     const wasBusy = card.classList.contains('busy');
 
     if (run) {
+      const curMode = run.mode === 'plus' ? 'plus' : 'local';
+      const curH = Math.max(1, Math.min(4, Number(run.handles) || 1));
+      const planCtl = curMode === 'plus'
+        ? `<div class="plan-ctl plus">
+             <span class="plan-now">${PS_ICON}<span>آنلاین · Plus</span></span>
+             <button class="plan-btn" data-act="local">تعویض به دسته</button>
+           </div>`
+        : `<div class="plan-ctl">
+             <span class="plan-now">بازیکن</span>
+             <span class="plan-step">
+               <button data-act="dec" ${curH <= 1 ? 'disabled' : ''} aria-label="کم کردن بازیکن">−</button>
+               <b>${fa(curH)}</b>
+               <button data-act="inc" ${curH >= 4 ? 'disabled' : ''} aria-label="افزودن بازیکن">+</button>
+             </span>
+             <button class="plan-btn plus" data-act="plus">${PS_ICON}Plus</button>
+           </div>`;
       card.classList.add('busy');
       delete card.dataset.cost;
       card.innerHTML = `
@@ -467,7 +521,8 @@ function syncCards(opts = {}) {
         </div>
         <div class="timer"><span data-h>۰۰</span><span class="colon">:</span><span data-m>۰۰</span><span class="colon">:</span><span data-s class="sec">۰۰</span></div>
         <div class="step-track"><i data-step></i></div>
-        <div class="meta-row"><span>شروع <b>${run.start_label}</b></span><span><b>${fa(run.handles)}</b> دسته</span></div>
+        <div class="meta-row"><span>شروع <b>${run.start_label}</b></span><span><b>${runPlanLabel(run)}</b></span></div>
+        ${planCtl}
         <div class="price-row"><span>هزینه تا این لحظه</span><span class="money" data-cost>۰</span></div>
         <div class="ctrl two">
           <button class="stop-btn">پایان و تسویه</button>
@@ -487,11 +542,12 @@ function syncCards(opts = {}) {
         </div>
         <div class="timer">۰۰<span class="colon">:</span>۰۰<span class="colon">:</span>۰۰</div>
         <div class="step-track"><i></i></div>
-        <div class="meta-row"><span class="muted">آماده شروع</span><span>نرخ <b>${fa(h)}</b> دسته</span></div>
+        <div class="meta-row"><span class="muted">آماده شروع</span><span>${isPlus ? `نرخ <b>Plus</b>` : `نرخ <b>${fa(sel.handles)}</b> دسته`}</span></div>
         <div class="price-row"><span>هزینه هر ساعت</span><span class="money">${fmtMoney(rate)}</span></div>
         <div class="handles">
           <span class="seg-thumb" aria-hidden="true"></span>
-          ${[1, 2, 3, 4].map((n) => `<button data-h="${n}" class="${n === h ? 'on' : ''}" aria-pressed="${n === h}">${fa(n)} دسته</button>`).join('')}
+          ${[1, 2, 3, 4].map((n) => `<button data-h="${n}" class="${!isPlus && n === sel.handles ? 'on' : ''}" aria-pressed="${!isPlus && n === sel.handles}" title="${fa(n)} دسته">${fa(n)}</button>`).join('')}
+          <button data-mode="plus" class="plus${isPlus ? ' on' : ''}" aria-pressed="${isPlus}" title="آنلاین (Plus)">${PS_ICON}<span>Plus</span></button>
         </div>
         <div class="ctrl"><button class="start-btn">شروع بازی</button></div>`;
       placeSegThumb(card);
@@ -559,7 +615,7 @@ function tick() {
     const stepBar = card.querySelector('[data-step]');
     if (stepBar) stepBar.style.width = ((sec % stepSec) / stepSec) * 100 + '%';
 
-    const cost = billFor(sec, run.rate, st).play;
+    const cost = billPlan(runLegs(run), st, now).play;
     const costNode = card.querySelector('[data-cost]');
     if (costNode && card.dataset.cost !== String(cost)) {
       card.dataset.cost = String(cost);
@@ -584,21 +640,30 @@ consolesEl.addEventListener('click', (e) => {
   const c = card.dataset.c;
   const hBtn = e.target.closest('.handles button');
   if (hBtn) {
-    handleSel[c] = Number(hBtn.dataset.h);
-    localStorage.setItem('gc-handles', JSON.stringify(handleSel));
+    if (hBtn.dataset.mode === 'plus') {
+      planSel[c] = { mode: 'plus', handles: (planSel[c] || {}).handles || 2 };
+    } else {
+      planSel[c] = { mode: 'local', handles: Number(hBtn.dataset.h) || 2 };
+    }
+    savePlanSel();
     card.querySelectorAll('.handles button').forEach((b) => {
-      b.classList.toggle('on', b === hBtn);
-      b.setAttribute('aria-pressed', b === hBtn);
+      const on = b === hBtn;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on);
     });
     placeSegThumb(card);
     pop(hBtn, 1.12);
     if (canAnim) gsap.fromTo(card.querySelector('.price-row .money'), { opacity: .2 }, { opacity: 1, duration: .35 });
     // update the rate + label in place
-    const rate = Number(S.settings.rates[String(handleSel[c])] || 0);
-    card.querySelector('.meta-row span:last-child').innerHTML = `نرخ <b>${fa(handleSel[c])}</b> دسته`;
+    const sel = planSel[c];
+    const rate = selRate(sel, S.settings);
+    card.querySelector('.meta-row span:last-child').innerHTML = sel.mode === 'plus'
+      ? 'نرخ <b>Plus</b>' : `نرخ <b>${fa(sel.handles)}</b> دسته`;
     card.querySelector('.price-row .money').textContent = fmtMoney(rate);
     return;
   }
+  const pBtn = e.target.closest('.plan-ctl button');
+  if (pBtn && !pBtn.disabled) return adjustPlan(c, pBtn.dataset.act);
   if (e.target.closest('.start-btn')) return startConsole(c);
   if (e.target.closest('.stop-btn')) return openStopModal(c);
   if (e.target.closest('.cancel-btn')) return cancelConsole(c);
@@ -632,14 +697,39 @@ async function startConsole(c) {
   const btn = card && card.querySelector('.start-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'در حال شروع…'; }
   try {
-    const r = await api('/api/start', { console: c, handles: handleSel[c] });
+    const sel = planSel[c] || { mode: 'local', handles: 2 };
+    const r = await api('/api/start', { console: c, mode: sel.mode, handles: sel.handles });
     mergeState(r);
     render();
-    toast(`دستگاه ${fa(c)} شروع شد — ${fmtMoney(r.settings.rates[String(r.running[c].handles)])} ${CUR} در ساعت`, 'ok');
+    const run = r.running[c];
+    toast(`دستگاه ${fa(c)} شروع شد — ${runPlanLabel(run)} · ${fmtMoney(run.rate)} ${CUR} در ساعت`, 'ok');
   } catch (err) {
     toast(err.message, 'bad');
     if (btn) { btn.disabled = false; btn.textContent = 'شروع بازی'; }
   }
+}
+
+/* mid-game plan change: add/remove a player or switch to/from Plus.
+   The server closes the current billing leg and opens a new one at its own
+   clock, so the book and every open window stay in sync. */
+async function adjustPlan(c, act) {
+  const run = S && S.running[c];
+  if (!run) return;
+  let mode = run.mode === 'plus' ? 'plus' : 'local';
+  let handles = Math.max(1, Math.min(4, Number(run.handles) || 1));
+  if (act === 'plus') mode = 'plus';
+  else if (act === 'local') mode = 'local';
+  else if (act === 'inc') handles = Math.min(4, handles + 1);
+  else if (act === 'dec') handles = Math.max(1, handles - 1);
+  else return;
+  if (mode === 'local') { planSel[c] = { mode: 'local', handles }; savePlanSel(); }
+  try {
+    const r = await api('/api/plan', { console: c, mode, handles });
+    mergeState(r);
+    render();
+    const nr = r.running[c];
+    toast(`دستگاه ${fa(c)} — ${runPlanLabel(nr)} · ${fmtMoney(nr.rate)} ${CUR} در ساعت`, 'ok');
+  } catch (err) { toast(err.message, 'bad'); }
 }
 
 async function cancelConsole(c) {
@@ -668,7 +758,7 @@ function openStopModal(c) {
     <div class="kv">
       <div class="cell"><div class="k">شروع</div><div class="v">${run.start_label}</div></div>
       <div class="cell"><div class="k">مدت بازی</div><div class="v live" id="mDur">—</div></div>
-      <div class="cell"><div class="k">دسته</div><div class="v">${fa(run.handles)}</div></div>
+      <div class="cell"><div class="k">حالت</div><div class="v">${runPlanLabel(run)}</div></div>
       <div class="cell"><div class="k">نرخ ساعتی</div><div class="v">${fmtMoney(run.rate)}</div></div>
     </div>
     <div class="section-title">نوشیدنی و خوراکی</div>
@@ -698,10 +788,12 @@ function openStopModal(c) {
      `end` is also what gets posted, so the bill can never disagree with the
      number the cashier just read out. */
   const calc = (atMs = Date.now()) => {
-    const b = billFor(runSeconds(run, atMs), run.rate, S.settings);
+    const b = billPlan(runLegs(run), S.settings, atMs);
     const itemsTotal = items.reduce((a, i) => a + i.price * i.qty, 0);
     return { ...b, itemsTotal, total: b.play + itemsTotal };
   };
+
+  const legName = (g) => (g.mode === 'plus' ? 'Plus' : `${fa(g.handles || 1)} دسته`);
 
   const renderTotals = (fresh, atMs = Date.now()) => {
     const c = calc(atMs);
@@ -711,8 +803,11 @@ function openStopModal(c) {
     const prev = Number(box.dataset.total || 0);
     box.dataset.total = c.total;
     box.dataset.minutes = c.minutes;
+    const legPlay = c.legs.reduce((a, g) => a + g.play, 0);
+    const minCost = c.play - legPlay;
     box.innerHTML = `
-      <div class="row"><span>هزینه بازی (${fmtMinutes(c.minutes)} دقیقه)</span><span class="money">${fmtMoney(c.play)} ${CUR}</span></div>
+      ${c.legs.map((g) => `<div class="row"><span>بازی — ${legName(g)} (${fmtMinutes(g.minutes)} دقیقه)</span><span class="money">${fmtMoney(g.play)} ${CUR}</span></div>`).join('')}
+      ${minCost > 0 ? `<div class="row"><span>تکمیل حداقل زمان</span><span class="money">${fmtMoney(minCost)} ${CUR}</span></div>` : ''}
       <div class="row"><span>نوشیدنی و خوراکی</span><span class="money">${fmtMoney(c.itemsTotal)} ${CUR}</span></div>
       <div class="row big"><span>مبلغ قابل پرداخت</span><span class="money" id="mGrand">${fmtMoney(c.total)} ${CUR}</span></div>`;
     const grand = m.body.querySelector('#mGrand');
@@ -860,6 +955,9 @@ $('btnManual').addEventListener('click', () => {
       <div class="field"><label>دستگاه</label>
         <select id="mnConsole">${CONSOLES.map((c) => `<option value="${c}">دستگاه ${fa(c)}</option>`).join('')}</select>
       </div>
+      <div class="field"><label>حالت</label>
+        <select id="mnMode"><option value="local">دسته (محلی)</option><option value="plus">آنلاین (Plus)</option></select>
+      </div>
       <div class="field"><label>تعداد دسته</label>
         <select id="mnHandles">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${n === 2 ? 'selected' : ''}>${fa(n)} دسته</option>`).join('')}</select>
       </div>
@@ -876,13 +974,15 @@ $('btnManual').addEventListener('click', () => {
 
   const preview = () => {
     const iStart = m.body.querySelector('#mnStart'), iEnd = m.body.querySelector('#mnEnd');
-    const iHandles = m.body.querySelector('#mnHandles'), iExtra = m.body.querySelector('#mnExtra');
+    const iMode = m.body.querySelector('#mnMode'), iHandles = m.body.querySelector('#mnHandles'), iExtra = m.body.querySelector('#mnExtra');
     const iTotals = m.body.querySelector('#mnTotals');
-    if (!iStart || !iEnd || !iHandles || !iExtra || !iTotals) return;
+    if (!iStart || !iEnd || !iMode || !iHandles || !iExtra || !iTotals) return;
+    iHandles.disabled = iMode.value === 'plus';
     const s = new Date(iStart.value);
     const e = new Date(iEnd.value);
-    const h = Number(iHandles.value);
-    const rate = Number(S.settings.rates[String(h)] || 0);
+    const rate = iMode.value === 'plus'
+      ? Number(S.settings.plus_rate || 0)
+      : Number(S.settings.rates[String(Number(iHandles.value))] || 0);
     const sec = Math.max(0, (e - s) / 1000);
     const b = billFor(sec, rate, S.settings);
     const extra = Number(iExtra.value) || 0;
@@ -898,6 +998,7 @@ $('btnManual').addEventListener('click', () => {
   m.foot.querySelector('#mnSave').addEventListener('click', async () => {
     const payload = {
       console: m.body.querySelector('#mnConsole').value,
+      mode: m.body.querySelector('#mnMode').value,
       handles: Number(m.body.querySelector('#mnHandles').value),
       start: m.body.querySelector('#mnStart').value,
       end: m.body.querySelector('#mnEnd').value,
@@ -937,6 +1038,8 @@ $('btnSettings').addEventListener('click', () => {
     <div class="grid4">
       ${[1, 2, 3, 4].map((n) => `<div class="field"><label>${fa(n)} دسته</label>
         <input type="number" min="0" step="5000" id="stRate${n}" value="${st.rates[String(n)]}"></div>`).join('')}
+      <div class="field"><label>آنلاین (Plus)</label>
+        <input type="number" min="0" step="5000" id="stPlus" value="${st.plus_rate || 0}"></div>
     </div>
     <div class="section-title">نحوه محاسبه زمان</div>
     <div class="grid2">
@@ -980,13 +1083,14 @@ $('btnSettings').addEventListener('click', () => {
     const [mode, step] = m.body.querySelector('#stRound').value.split(':');
     const rates = {};
     [1, 2, 3, 4].forEach((n) => { rates[String(n)] = Number(m.body.querySelector('#stRate' + n).value) || 0; });
+    const plusRate = Number(m.body.querySelector('#stPlus').value) || 0;
     const drinks = [...drinksBox.querySelectorAll('.de-row')].map((r) => ({
       name: r.querySelector('.de-name').value.trim(),
       price: Number(r.querySelector('.de-price').value) || 0,
     })).filter((d) => d.name);
     const payload = {
       shop_name: m.body.querySelector('#stName').value,
-      rates, rounding: Number(step), round_mode: mode,
+      rates, plus_rate: plusRate, rounding: Number(step), round_mode: mode,
       min_minutes: Number(m.body.querySelector('#stMin').value) || 0,
       drinks,
     };
@@ -1074,7 +1178,7 @@ function printDay(day) {
       <td>${fmtClock(s.start)}</td>
       <td>${fmtClock(s.end)}</td>
       <td>${fa(Math.round(s.minutes))}</td>
-      <td>${fa(s.handles)}</td>
+      <td>${planRowLabel(s)}</td>
       <td>${fmtMoney(s.play)}</td>
       <td>${fmtMoney(s.items_total)}</td>
       <td>${fmtMoney(s.total)}</td>
@@ -1087,7 +1191,7 @@ function printDay(day) {
     <table>
       <thead><tr>
         <th>#</th><th>دستگاه</th><th>شروع</th><th>پایان</th><th>دقیقه</th>
-        <th>دسته</th><th>بازی</th><th>نوشیدنی</th><th>جمع</th><th>اقلام</th>
+        <th>حالت</th><th>بازی</th><th>نوشیدنی</th><th>جمع</th><th>اقلام</th>
       </tr></thead>
       <tbody>${rows || '<tr><td colspan="10">بدون حساب</td></tr>'}</tbody>
       <tfoot>
@@ -1106,7 +1210,7 @@ function dayTable(day) {
   return `
     <div class="table-wrap" style="max-height:50vh">
       <table class="log">
-        <thead><tr><th>#</th><th>دستگاه</th><th>شروع</th><th>پایان</th><th>مدت</th><th>دسته</th>
+        <thead><tr><th>#</th><th>دستگاه</th><th>شروع</th><th>پایان</th><th>مدت</th><th>حالت</th>
         <th>بازی</th><th>نوشیدنی</th><th>جمع</th></tr></thead>
         <tbody>
           ${rows.map((s, i) => `<tr>
@@ -1115,7 +1219,7 @@ function dayTable(day) {
             <td class="time">${fmtClock(s.start)}</td>
             <td class="time">${fmtClock(s.end)}</td>
             <td>${fmtDur(s.seconds)}</td>
-            <td class="num">${fa(s.handles)}</td>
+            <td class="num">${planRowLabel(s)}</td>
             <td class="num">${fmtMoney(s.play)}</td>
             <td class="num">${s.items_total ? fmtMoney(s.items_total) : '—'}</td>
             <td class="num total">${fmtMoney(s.total)}</td></tr>`).join('') ||

@@ -16,12 +16,17 @@ const B = globalThis.GCBilling;
 const cases = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
 const out = cases.map((c) => {
   const b = B.bill(c.sec, c.rate, c.settings);
-  return {
+  const r = {
     billMinutes: B.billMinutes(c.sec, c.settings),
     minutes: b.minutes,
     play: b.play,
     fmtMinutes: B.fmtMinutes(b.minutes),
   };
+  if (c.legs) {
+    const p = B.billPlan(c.legs, c.settings, c.end_ms);
+    r.plan = { minutes: p.minutes, play: p.play, legs: p.legs.length, min_extra: p.min_extra };
+  }
+  return r;
 });
 
 const ascii = JSON.stringify(out).replace(

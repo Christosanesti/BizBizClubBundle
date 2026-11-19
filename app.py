@@ -28,6 +28,7 @@ from urllib.parse import urlparse, parse_qs
 from billing import (
     MAX_SESSION_SECONDS,
     bill,
+    bill_plan,
     day_totals,
     normalise_items,
     num,
@@ -75,6 +76,7 @@ FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 DEFAULT_SETTINGS = {
     "shop_name": "گیم سنتر",
     "rates": {"1": 80000, "2": 100000, "3": 120000, "4": 140000},
+    "plus_rate": 60000,    # نرخ ساعتی حالت آنلاین (Plus)
     "rounding": 5,          # دقیقه — گام محاسبه
     "round_mode": "up",     # up | nearest | exact
     "min_minutes": 0,       # حداقل زمان محاسبه
@@ -199,6 +201,8 @@ def get_settings() -> dict:
                 for hk in ("1", "2", "3", "4"):
                     if hk in v:
                         merged["rates"][hk] = max(0, num(v[hk], merged["rates"][hk]))
+            elif k == "plus_rate":
+                merged["plus_rate"] = max(0, num(v, merged["plus_rate"]))
             elif k == "drinks" and isinstance(v, list):
                 clean = []
                 for item in v:
@@ -252,12 +256,19 @@ def public_state(with_settings=True) -> dict:
         if not isinstance(r, dict) or not r.get("start"):
             continue
         start = parse_iso(r["start"])
+        start_ms = int(r.get("start_ms") or ms(start))
+        legs = r.get("legs")
+        if not isinstance(legs, list) or not legs:
+            legs = [{"from_ms": start_ms, "mode": r.get("mode") or "local",
+                     "handles": int(r.get("handles", 1)), "rate": int(r.get("rate", 0))}]
         running[str(console)] = {
             "console": str(console),
+            "mode": r.get("mode") or "local",
             "handles": int(r.get("handles", 1)),
             "rate": int(r.get("rate", 0)),
+            "legs": legs,
             "start": r.get("start"),
-            "start_ms": int(r.get("start_ms") or ms(start)),
+            "start_ms": start_ms,
             "start_label": fa(start.strftime("%H:%M")),
             "note": r.get("note", ""),
         }
@@ -282,19 +293,41 @@ def public_state(with_settings=True) -> dict:
 
 
 # ---------------------------------------------------------------- operations
-def op_start(console: str, handles: int, note: str = "") -> dict:
+def resolve_plan(mode, handles, settings: dict):
+    """(mode, handles, hourly rate) — 'plus' is online play, flat rate;
+    'local' bills by controller count. Rate is snapshotted per leg."""
+    mode = "plus" if str(mode) == "plus" else "local"
+    h = max(1, min(4, num(handles, 1) or 1))
+    rate = num(settings.get("plus_rate"), 0) if mode == "plus" else rate_for(h, settings)
+    return mode, h, rate
+
+
+def stored_legs(r: dict, start_ms: int) -> list:
+    """The billing legs of a running session; synthesised for old state files."""
+    legs = r.get("legs")
+    if isinstance(legs, list) and legs:
+        return legs
+    return [{"from_ms": start_ms, "mode": r.get("mode") or "local",
+             "handles": int(r.get("handles", 1)), "rate": int(r.get("rate", 0))}]
+
+
+def op_start(console: str, handles: int, note: str = "", mode: str = "local") -> dict:
     day = current_day()
     st = load_state()
     if str(console) in st:
         raise ValueError("این دستگاه همین حالا در حال بازی است.")
-    handles = max(1, min(4, num(handles, 1) or 1))
+    settings = get_settings()
+    mode, handles, rate = resolve_plan(mode, handles, settings)
     started = now()
+    start_ms = ms(started)
     st[str(console)] = {
         "console": str(console),
+        "mode": mode,
         "handles": handles,
-        "rate": rate_for(handles, get_settings()),
+        "rate": rate,
+        "legs": [{"from_ms": start_ms, "mode": mode, "handles": handles, "rate": rate}],
         "start": iso(started),
-        "start_ms": ms(started),
+        "start_ms": start_ms,
         "note": (note or "").strip(),
     }
     save_state(st)
@@ -331,8 +364,9 @@ def op_stop(console: str, items, note: str = "", end_ms=None, op_id: str = "") -
     start_ms = int(r.get("start_ms") or ms(parse_iso(r["start"])))
     end = resolve_end_ms(end_ms, start_ms)
     settings = get_settings()
-    rate = int(r.get("rate") or rate_for(r.get("handles", 1), settings))
-    b = bill((end - start_ms) / 1000.0, rate, settings)
+    legs = stored_legs(r, start_ms)
+    b = bill_plan(legs, settings, end)
+    last_leg = legs[-1]
 
     clean = normalise_items(items)
     items_sum = sum(i["price"] * i["qty"] for i in clean)
@@ -340,8 +374,10 @@ def op_stop(console: str, items, note: str = "", end_ms=None, op_id: str = "") -
         "id": secrets.token_hex(6),
         "op_id": str(op_id or "")[:64],
         "console": str(console),
-        "handles": int(r.get("handles", 1)),
-        "rate": rate,
+        "mode": last_leg.get("mode") or "local",
+        "handles": int(last_leg.get("handles", 1)),
+        "rate": int(last_leg.get("rate", 0)),
+        "segments": b["legs"],
         "start": iso(from_ms(start_ms)),
         "end": iso(from_ms(end)),
         "start_ms": start_ms,
@@ -371,9 +407,34 @@ def op_cancel(console: str) -> dict:
     return public_state()
 
 
+def op_plan(console: str, mode: str, handles: int) -> dict:
+    """Change the plan mid-game: handles 1–4 or online (Plus).
+
+    The session keeps a list of legs; each leg snapshots its own hourly rate,
+    so the bill is the honest sum of every stretch at its own price. Repeating
+    the current plan is a no-op — no empty legs are ever written."""
+    st = load_state()
+    r = st.get(str(console))
+    if not isinstance(r, dict) or not r.get("start"):
+        raise ValueError("این دستگاه در حال بازی نیست.")
+    settings = get_settings()
+    new_mode, new_h, new_rate = resolve_plan(mode, handles, settings)
+    cur_mode = r.get("mode") or "local"
+    cur_h = int(r.get("handles", 1) or 1)
+    same = new_mode == cur_mode and (new_mode == "plus" or new_h == cur_h)
+    if not same:
+        start_ms = int(r.get("start_ms") or ms(parse_iso(r["start"])))
+        legs = stored_legs(r, start_ms)
+        legs.append({"from_ms": now_ms(), "mode": new_mode,
+                     "handles": new_h, "rate": new_rate})
+        r["legs"] = legs
+        r["mode"], r["handles"], r["rate"] = new_mode, new_h, new_rate
+        save_state(st)
+    return public_state()
+
+
 def op_manual(payload: dict) -> dict:
     day = current_day()
-    handles = max(1, min(4, num(payload.get("handles", 1), 1) or 1))
     try:
         start = parse_iso(str(payload["start"]))
         end = parse_iso(str(payload["end"]))
@@ -388,7 +449,8 @@ def op_manual(payload: dict) -> dict:
         raise ValueError("مدت بازی نمی‌تواند بیش از ۲۴ ساعت باشد.")
 
     settings = get_settings()
-    rate = rate_for(handles, settings)
+    mode, handles, rate = resolve_plan(payload.get("mode"),
+                                       payload.get("handles", 1), settings)
     b = bill((end_ms - start_ms) / 1000.0, rate, settings)
     extra = max(0, num(payload.get("extra", 0)))
     items = []
@@ -398,8 +460,12 @@ def op_manual(payload: dict) -> dict:
         "id": secrets.token_hex(6),
         "op_id": str(payload.get("op_id") or "")[:64],
         "console": str(payload.get("console", "1")),
+        "mode": mode,
         "handles": handles,
         "rate": rate,
+        "segments": [{"mode": mode, "handles": handles, "rate": rate,
+                      "from_ms": start_ms, "to_ms": end_ms,
+                      "seconds": b["seconds"], "minutes": b["minutes"], "play": b["play"]}],
         "start": iso(from_ms(start_ms)),
         "end": iso(from_ms(end_ms)),
         "start_ms": start_ms,
@@ -441,9 +507,10 @@ def op_update_settings(payload: dict) -> dict:
     mode = payload.get("round_mode", cur["round_mode"])
     if mode not in ("up", "nearest", "exact"):
         mode = cur["round_mode"]
+    plus_rate = max(0, num(payload.get("plus_rate", cur["plus_rate"]), cur["plus_rate"]))
     drinks = normalise_items([dict(d, qty=1) for d in payload.get("drinks", cur["drinks"])])
-    new = {"shop_name": shop, "rates": rates, "rounding": rounding,
-           "round_mode": mode, "min_minutes": min_minutes,
+    new = {"shop_name": shop, "rates": rates, "plus_rate": plus_rate,
+           "rounding": rounding, "round_mode": mode, "min_minutes": min_minutes,
            "drinks": [{"name": d["name"], "price": d["price"]} for d in drinks]}
     save_json(SETTINGS_FILE, new)
     return public_state()
@@ -514,6 +581,21 @@ def day_json(file: str) -> dict:
     return day
 
 
+def plan_label(s: dict) -> str:
+    """What the 'دسته/حالت' column says: '۲', 'Plus' or '۲+Plus'."""
+    segs = s.get("segments") if isinstance(s.get("segments"), list) else []
+    parts = []
+    for g in segs:
+        if not isinstance(g, dict):
+            continue
+        label = "Plus" if g.get("mode") == "plus" else str(num(g.get("handles"), 1) or 1)
+        if label not in parts:
+            parts.append(label)
+    if parts:
+        return "+".join(parts)
+    return str(num(s.get("handles"), 1) or 1)
+
+
 def day_csv(file: str | None = None) -> bytes:
     if file:
         day = day_json(file)
@@ -526,11 +608,11 @@ def day_csv(file: str | None = None) -> bytes:
     w = csv.writer(buf)
     w.writerow(["تاریخ", title])
     w.writerow([])
-    w.writerow(["دستگاه", "دسته", "شروع", "پایان", "مدت (دقیقه)",
+    w.writerow(["دستگاه", "حالت", "شروع", "پایان", "مدت (دقیقه)",
                 "نرخ ساعتی", "هزینه بازی", "نوشیدنی", "جمع", "توضیح"])
     for s in day.get("sessions", []):
         w.writerow([
-            s.get("console"), s.get("handles"),
+            s.get("console"), plan_label(s),
             parse_iso(s["start"]).strftime("%H:%M"),
             parse_iso(s["end"]).strftime("%H:%M"),
             s.get("minutes"), s.get("rate"), s.get("play"),
@@ -547,7 +629,7 @@ def day_csv(file: str | None = None) -> bytes:
 
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GameCenter/1.0"
+    server_version = "GameCenter/1.2.0"
 
     def log_message(self, fmt, *args):  # keep the console quiet
         pass
@@ -631,7 +713,12 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if path == "/api/start":
                     return self._json({"ok": True, **op_start(
-                        str(data.get("console", "1")), data.get("handles", 1), data.get("note", ""))})
+                        str(data.get("console", "1")), data.get("handles", 1),
+                        data.get("note", ""), data.get("mode", "local"))})
+                if path == "/api/plan":
+                    return self._json({"ok": True, **op_plan(
+                        str(data.get("console", "1")), data.get("mode", "local"),
+                        data.get("handles", 1))})
                 if path == "/api/stop":
                     return self._json({"ok": True, **op_stop(
                         str(data.get("console", "1")), data.get("items", []), data.get("note", ""),

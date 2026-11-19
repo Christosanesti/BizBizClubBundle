@@ -246,10 +246,10 @@ button{font-family:inherit}
 }
 .card.busy .price-row .money{color:#fff; text-shadow:0 0 16px color-mix(in srgb, var(--acc) 55%, transparent)}
 
-/* handles */
+/* handles + Plus plan picker */
 .handles{
   position:relative;
-  display:grid; grid-template-columns:repeat(4,1fr); gap:0;
+  display:grid; grid-template-columns:repeat(5,1fr); gap:0;
   padding:3px; border-radius:13px; background:rgba(0,0,0,.3);
   border:1px solid rgba(255,255,255,.055);
 }
@@ -270,6 +270,42 @@ button{font-family:inherit}
 .handles button:hover{color:#dce8ff; background:rgba(255,255,255,.06)}
 .handles button.on{color:#04101f; font-weight:800}
 .handles button.on:hover{background:transparent}
+.handles button.plus{display:flex; align-items:center; justify-content:center; gap:4px}
+.handles button.plus svg{width:13px; height:13px}
+.handles button.plus span{font-size:11px; letter-spacing:.2px}
+.handles button.plus.on{color:#04101f}
+
+/* mid-game plan controls on a busy card */
+.plan-ctl{
+  display:flex; align-items:center; gap:8px;
+  padding:7px 10px; border-radius:11px; font-size:11.5px;
+  background:rgba(255,255,255,.035); border:1px solid var(--line);
+}
+.plan-ctl .plan-now{color:var(--muted); display:flex; align-items:center; gap:6px; min-width:0}
+.plan-ctl .plan-now svg{width:14px; height:14px; color:var(--acc); flex:0 0 auto}
+.plan-ctl.plus .plan-now{color:#cfe0ff; font-weight:600}
+.plan-step{display:flex; align-items:center; gap:2px; margin-inline-start:auto}
+.plan-step b{min-width:22px; text-align:center; font-size:13px; color:#d5e3fb; font-variant-numeric:tabular-nums}
+.plan-step button{
+  cursor:pointer; border:0; background:rgba(255,255,255,.07); color:#cfe0ff;
+  width:24px; height:24px; border-radius:8px; font-size:14px; line-height:1;
+  transition:background .15s, transform .1s;
+}
+.plan-step button:hover:not(:disabled){background:rgba(255,255,255,.14)}
+.plan-step button:active:not(:disabled){transform:scale(.92)}
+.plan-step button:disabled{opacity:.35; cursor:default}
+.plan-btn{
+  cursor:pointer; border:1px solid var(--line); border-radius:9px;
+  background:rgba(255,255,255,.05); color:#cfe0ff;
+  padding:5px 10px; font-size:11px; font-weight:600;
+  display:flex; align-items:center; gap:5px;
+  transition:background .15s, border-color .2s, transform .1s;
+}
+.plan-btn:hover{background:rgba(255,255,255,.1)}
+.plan-btn:active{transform:scale(.96)}
+.plan-btn.plus{border-color:rgba(167,139,250,.4); color:#d9ccff}
+.plan-btn.plus svg{width:12px; height:12px}
+.plan-btn.plus:hover{background:rgba(167,139,250,.14)}
 
 /* card controls */
 .ctrl{display:grid; grid-template-columns:1fr; gap:6px; margin-top:auto}

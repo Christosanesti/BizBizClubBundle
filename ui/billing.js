@@ -56,6 +56,51 @@
     return { seconds, minutes, play: playCost(minutes, rate) };
   }
 
+  /* bill a session whose rate changed mid-way — mirror of billing.bill_plan.
+     legs: [{from_ms, rate, mode?, handles?}...] chronological, last leg open,
+     ends at endMs. Each leg is billed with the shop's rounding; the
+     minimum-time floor applies once, at the last leg's rate. One leg is
+     exactly bill(). */
+  function billPlan(legs, st, endMs) {
+    const clean = (Array.isArray(legs) ? legs : [])
+      .filter((l) => l && num(l.from_ms, -1) >= 0)
+      .map((l) => ({ ...l, from_ms: num(l.from_ms, 0), rate: num(l.rate, 0) }));
+    if (!clean.length) clean.push({ from_ms: 0, rate: 0 });
+    const end = num(endMs, 0);
+    const n = clean.length;
+    const bounds = (i) => {
+      const frm = clean[i].from_ms;
+      const raw = i + 1 < n ? clean[i + 1].from_ms : end;
+      return [frm, Math.max(frm, Math.min(raw, end))];
+    };
+    const pick = (l) => ({ mode: l.mode, handles: l.handles });
+    const detail = [];
+    if (n === 1) {
+      const [frm, to] = bounds(0);
+      const sec = Math.max(0, (to - frm) / 1000);
+      const b = bill(sec, clean[0].rate, st);
+      detail.push({ ...pick(clean[0]), rate: clean[0].rate, from_ms: frm, to_ms: to,
+        seconds: b.seconds, minutes: b.minutes, play: b.play });
+      return { seconds: b.seconds, minutes: b.minutes, play: b.play, legs: detail, min_extra: 0 };
+    }
+    const nofloor = { ...(st || {}), min_minutes: 0 };
+    let totalMin = 0, play = 0, seconds = 0;
+    for (let i = 0; i < n; i++) {
+      const [frm, to] = bounds(i);
+      const sec = Math.max(0, (to - frm) / 1000);
+      const minutes = round2(billMinutes(sec, nofloor));
+      const p = playCost(minutes, clean[i].rate);
+      detail.push({ ...pick(clean[i]), rate: clean[i].rate, from_ms: frm, to_ms: to,
+        seconds: sec, minutes, play: p });
+      totalMin += minutes; play += p; seconds += sec;
+    }
+    totalMin = round2(totalMin);
+    const deficit = Math.max(0, num(st && st.min_minutes, 0) - totalMin);
+    const minPlay = deficit > 0 ? playCost(deficit, clean[n - 1].rate) : 0;
+    return { seconds, minutes: round2(totalMin + deficit), play: play + minPlay,
+             legs: detail, min_extra: deficit };
+  }
+
   function fa(s) {
     return String(s).replace(/[0-9]/g, (d) => FA_DIGITS[+d]);
   }
@@ -67,5 +112,5 @@
     return fa(s.replace('.', '٫'));
   }
 
-  root.GCBilling = { num, roundHalfUp, round2, billMinutes, playCost, bill, fmtMinutes };
+  root.GCBilling = { num, roundHalfUp, round2, billMinutes, playCost, bill, billPlan, fmtMinutes };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

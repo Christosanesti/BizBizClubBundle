@@ -98,6 +98,68 @@ class RoundingTests(unittest.TestCase):
         self.assertEqual(billing.rate_for(None, s), 80000)
 
 
+class PlanBillingTests(unittest.TestCase):
+    """bill_plan: a session whose rate changed mid-way."""
+
+    def test_single_leg_is_exactly_bill(self):
+        settings = st(rounding=5, round_mode="up")
+        legs = [{"from_ms": 0, "rate": 80000, "mode": "local", "handles": 2}]
+        got = billing.bill_plan(legs, settings, 90 * 60 * 1000)
+        want = billing.bill(90 * 60, 80000, settings)
+        self.assertEqual(got["play"], want["play"])
+        self.assertEqual(got["minutes"], want["minutes"])
+        self.assertEqual(got["min_extra"], 0)
+        self.assertEqual(len(got["legs"]), 1)
+
+    def test_two_legs_sum_their_own_prices(self):
+        # 30 min @ 100k + 30 min @ 140k, exact minutes, no rounding games
+        settings = st(rounding=1, round_mode="exact")
+        legs = [
+            {"from_ms": 0, "rate": 100000, "mode": "local", "handles": 2},
+            {"from_ms": 30 * 60 * 1000, "rate": 140000, "mode": "local", "handles": 4},
+        ]
+        got = billing.bill_plan(legs, settings, 60 * 60 * 1000)
+        self.assertEqual(got["play"], 50000 + 70000)
+        self.assertEqual(got["minutes"], 60)
+        self.assertEqual([g["play"] for g in got["legs"]], [50000, 70000])
+        self.assertEqual(got["legs"][1]["handles"], 4)
+
+    def test_each_leg_keeps_the_shop_rounding(self):
+        # 3 min then 3 min at 5-min round-up → 5 + 5 billed, not 10 once
+        settings = st(rounding=5, round_mode="up")
+        legs = [
+            {"from_ms": 0, "rate": 60000},
+            {"from_ms": 3 * 60 * 1000, "rate": 120000},
+        ]
+        got = billing.bill_plan(legs, settings, 6 * 60 * 1000)
+        self.assertEqual(got["minutes"], 10)
+        self.assertEqual(got["play"], billing.play_cost(5, 60000) + billing.play_cost(5, 120000))
+
+    def test_minimum_time_charged_once_at_last_rate(self):
+        settings = st(rounding=1, round_mode="exact", min_minutes=15)
+        legs = [
+            {"from_ms": 0, "rate": 60000},
+            {"from_ms": 60 * 1000, "rate": 120000},
+        ]
+        got = billing.bill_plan(legs, settings, 120 * 1000)  # 1 + 1 min
+        self.assertEqual(got["minutes"], 15)
+        # 2 billed minutes at their rates + 13 topped up at the last rate
+        want = billing.play_cost(1, 60000) + billing.play_cost(1, 120000) + billing.play_cost(13, 120000)
+        self.assertEqual(got["play"], want)
+        self.assertEqual(got["min_extra"], 13)
+
+    def test_junk_legs_are_skipped(self):
+        settings = st()
+        got = billing.bill_plan([None, "x", {"rate": 5}, {"from_ms": "bad"},
+                                 {"from_ms": 0, "rate": 80000}], settings, 60000)
+        self.assertEqual(got["play"], billing.bill(60, 80000, settings)["play"])
+
+    def test_empty_plan_bills_zero(self):
+        got = billing.bill_plan([], st(), 0)
+        self.assertEqual(got["play"], 0)
+        self.assertEqual(got["minutes"], 0)
+
+
 class NumParseTests(unittest.TestCase):
     def test_digit_sets(self):
         self.assertEqual(billing.num("۱۰۰٬۰۰۰"), 100000)
@@ -177,6 +239,25 @@ def parity_cases() -> list[dict]:
             "settings": {"rounding": rnd.choice(steps), "round_mode": rnd.choice(modes),
                          "min_minutes": rnd.choice([0, 0, 5, 15, 30])},
         })
+    # multi-leg plans: rate/mode changes mid-session must bill identically
+    # on both sides of the mirror
+    for _ in range(120):
+        n = rnd.choice([2, 2, 3, 4])
+        bounds = sorted(rnd.sample(range(1, 600), n - 1))
+        legs = []
+        for i, cut in enumerate([0] + bounds):
+            legs.append({
+                "from_ms": cut * 10000,
+                "rate": rnd.choice(rates),
+                "mode": "plus" if rnd.random() < .3 else "local",
+                "handles": rnd.randint(1, 4),
+            })
+        cases.append({
+            "sec": 0, "rate": 0,
+            "legs": legs, "end_ms": 600 * 10000,
+            "settings": {"rounding": rnd.choice(steps), "round_mode": rnd.choice(modes),
+                         "min_minutes": rnd.choice([0, 0, 5, 15, 30])},
+        })
     return cases
 
 
@@ -211,6 +292,18 @@ class JavaScriptParityTests(unittest.TestCase):
                 places=9, msg=f"billMinutes {case}")
             self.assertEqual(js["minutes"], py["minutes"], f"minutes {case}")
             self.assertEqual(js["play"], py["play"], f"play {case}")
+
+    def test_plan_identical_numbers(self):
+        for case, js in zip(self.cases, self.js):
+            if "legs" not in case:
+                continue
+            py = billing.bill_plan(case["legs"], case["settings"], case["end_ms"])
+            self.assertAlmostEqual(js["plan"]["minutes"], py["minutes"], places=9,
+                                   msg=f"plan minutes {case}")
+            self.assertEqual(js["plan"]["play"], py["play"], f"plan play {case}")
+            self.assertEqual(js["plan"]["legs"], len(py["legs"]), f"plan legs {case}")
+            self.assertAlmostEqual(js["plan"]["min_extra"], py["min_extra"], places=9,
+                                   msg=f"plan min_extra {case}")
 
     def test_identical_display(self):
         for case, js in zip(self.cases, self.js):
@@ -406,6 +499,104 @@ class RoundingSettlementTests(BookTestCase):
         row = self._settle(2, rounding=0, round_mode="exact", min_minutes=15)
         self.assertEqual(row["minutes"], 15)
         self.assertEqual(row["play"], 20000)
+
+
+class PlanSessionTests(BookTestCase):
+    """Mid-game plan changes: handles 1–4 and online (Plus)."""
+
+    def test_plus_start_uses_plus_rate(self):
+        app.op_update_settings({"plus_rate": 50000})
+        app.op_start("1", 2, mode="plus")
+        run = app.load_state()["1"]
+        self.assertEqual(run["mode"], "plus")
+        self.assertEqual(run["rate"], 50000)
+        row = self.settle(60 * 60)["session"]
+        self.assertEqual(row["mode"], "plus")
+        self.assertEqual(row["play"], 50000)
+        self.assertEqual(app.plan_label(row), "Plus")
+
+    def test_plan_change_splits_the_bill(self):
+        app.op_start("1", 2)                       # 100,000/h
+        self.clock.advance(30 * 60)
+        app.op_plan("1", "local", 4)               # → 140,000/h
+        self.clock.advance(30 * 60)
+        end = self.clock.now_ms()
+        row = app.op_stop("1", [], end_ms=end)["session"]
+        # exact-mode-free default settings: 5-min step, both legs land on 30
+        self.assertEqual(row["play"], 50000 + 70000)
+        self.assertEqual(row["minutes"], 60)
+        self.assertEqual(row["mode"], "local")
+        self.assertEqual(row["handles"], 4)
+        self.assertEqual(len(row["segments"]), 2)
+        self.assertEqual([g["rate"] for g in row["segments"]], [100000, 140000])
+        self.assertEqual(app.plan_label(row), "2+4")
+
+    def test_switch_to_plus_and_back(self):
+        app.op_update_settings({"plus_rate": 50000})
+        app.op_start("1", 1)                       # 80,000/h
+        self.clock.advance(10 * 60)
+        app.op_plan("1", "plus", 1)
+        self.clock.advance(10 * 60)
+        app.op_plan("1", "local", 3)               # 120,000/h
+        self.clock.advance(10 * 60)
+        row = self.settle(0)["session"]
+        # 10 min legs at 5-min rounding → 10 billed each
+        self.assertEqual(row["play"],
+                         billing.play_cost(10, 80000) + billing.play_cost(10, 50000)
+                         + billing.play_cost(10, 120000))
+        self.assertEqual(app.plan_label(row), "1+Plus+3")
+        self.assertEqual(len(app.load_state()), 0)
+
+    def test_same_plan_is_a_noop(self):
+        app.op_start("1", 2)
+        before = app.load_state()["1"]["legs"]
+        app.op_plan("1", "local", 2)
+        self.assertEqual(app.load_state()["1"]["legs"], before)
+        app.op_plan("1", "plus", 2)
+        app.op_plan("1", "plus", 3)                # handles ignored in plus mode
+        self.assertEqual(len(app.load_state()["1"]["legs"]), 2)
+
+    def test_plan_on_idle_console_is_refused(self):
+        with self.assertRaises(ValueError):
+            app.op_plan("2", "plus", 1)
+
+    def test_running_state_exposes_legs(self):
+        app.op_start("1", 2)
+        self.clock.advance(60)
+        app.op_plan("1", "local", 3)
+        run = app.public_state()["running"]["1"]
+        self.assertEqual(run["mode"], "local")
+        self.assertEqual(run["handles"], 3)
+        self.assertEqual(len(run["legs"]), 2)
+        self.assertEqual(run["legs"][1]["rate"], 120000)
+
+    def test_legacy_running_state_without_legs_still_bills(self):
+        app.op_start("1", 2)
+        st = app.load_state()
+        st["1"].pop("legs")
+        st["1"].pop("mode", None)
+        app.save_state(st)
+        row = self.settle(60 * 60)["session"]
+        self.assertEqual(row["play"], 100000)
+        self.assertEqual(row["mode"], "local")
+
+    def test_manual_plus_entry(self):
+        app.op_update_settings({"plus_rate": 50000})
+        start = self.clock.now() - dt.timedelta(minutes=60)
+        app.op_manual({"console": "1", "mode": "plus", "handles": 2,
+                       "start": start.isoformat(timespec="minutes"),
+                       "end": self.clock.now().isoformat(timespec="minutes")})
+        row = self.rows()[0]
+        self.assertEqual(row["mode"], "plus")
+        self.assertEqual(row["rate"], 50000)
+        self.assertEqual(row["play"], 50000)
+        self.assertEqual(app.plan_label(row), "Plus")
+
+    def test_plus_rate_in_settings_round_trip(self):
+        app.op_update_settings({"plus_rate": "۷۵٬۰۰۰"})
+        self.assertEqual(app.get_settings()["plus_rate"], 75000)
+        s = app.op_update_settings({"plus_rate": -10})["settings"]
+        self.assertEqual(s["plus_rate"], 0)
 
 
 class ManualEntryTests(BookTestCase):

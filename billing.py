@@ -97,6 +97,70 @@ def bill(seconds: float, rate: int, settings: dict) -> dict:
     return {"seconds": max(0.0, float(seconds)), "minutes": minutes, "play": play}
 
 
+def bill_plan(legs, settings: dict, end_ms) -> dict:
+    """Bill a session whose rate changed mid-way (handles or Plus toggled).
+
+    legs: chronological [{'from_ms', 'rate', 'mode'?, 'handles'?}, ...] — the
+    last leg is still open and runs until end_ms. Each leg is billed on its
+    own with the shop's rounding rules, so time at ۲ دسته and time at Plus are
+    two honest stretches, not an average. The minimum-time floor applies once
+    to the whole session and is charged at the last leg's rate.
+
+    A single leg returns exactly what bill() returns — one rate, one stretch —
+    so every session that never changed plan bills byte-for-byte as before.
+    """
+    clean = []
+    for l in legs if isinstance(legs, list) else []:
+        if not isinstance(l, dict):
+            continue
+        frm = num(l.get("from_ms"), -1)
+        if frm < 0:
+            continue
+        clean.append({**l, "from_ms": frm, "rate": num(l.get("rate"), 0)})
+    if not clean:
+        clean = [{"from_ms": 0, "rate": 0}]
+    end = num(end_ms, 0)
+    n = len(clean)
+
+    def bounds(i: int):
+        frm = clean[i]["from_ms"]
+        raw_to = clean[i + 1]["from_ms"] if i + 1 < n else end
+        return frm, max(frm, min(raw_to, end))
+
+    detail = []
+    if n == 1:
+        frm, to = bounds(0)
+        sec = max(0.0, (to - frm) / 1000.0)
+        b = bill(sec, clean[0]["rate"], settings)
+        detail.append({**{k: clean[0].get(k) for k in ("mode", "handles")},
+                       "rate": clean[0]["rate"], "from_ms": frm, "to_ms": to,
+                       "seconds": b["seconds"], "minutes": b["minutes"], "play": b["play"]})
+        return {"seconds": b["seconds"], "minutes": b["minutes"], "play": b["play"],
+                "legs": detail, "min_extra": 0.0}
+
+    nofloor = dict(settings)
+    nofloor["min_minutes"] = 0
+    total_min = 0.0
+    play = 0
+    seconds = 0.0
+    for i, leg in enumerate(clean):
+        frm, to = bounds(i)
+        sec = max(0.0, (to - frm) / 1000.0)
+        minutes = round2(bill_minutes(sec, nofloor))
+        p = play_cost(minutes, leg["rate"])
+        detail.append({**{k: leg.get(k) for k in ("mode", "handles")},
+                       "rate": leg["rate"], "from_ms": frm, "to_ms": to,
+                       "seconds": sec, "minutes": minutes, "play": p})
+        total_min += minutes
+        play += p
+        seconds += sec
+    total_min = round2(total_min)
+    deficit = max(0.0, float(num(settings.get("min_minutes"), 0)) - total_min)
+    min_play = play_cost(deficit, clean[-1]["rate"]) if deficit > 0 else 0
+    return {"seconds": seconds, "minutes": round2(total_min + deficit),
+            "play": play + min_play, "legs": detail, "min_extra": deficit}
+
+
 def normalise_items(items) -> list:
     """Keep only sellable lines; caps quantity so a typo can't invent stock."""
     out = []
