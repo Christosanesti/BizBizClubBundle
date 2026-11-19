@@ -159,9 +159,11 @@ CONSOLES.forEach((c) => {
   const p = planSel[c];
   if (!p || typeof p !== 'object') {
     planSel[c] = { mode: 'local', handles: Number(legacyHandles[c]) || 2 };
-  } else if (p.mode !== 'plus' && !(p.handles >= 1 && p.handles <= 4)) {
-    p.handles = 2;
+    return;
   }
+  p.mode = p.mode === 'plus' ? 'plus' : 'local';
+  p.handles = Math.round(Number(p.handles));
+  if (!(p.handles >= 1 && p.handles <= 4)) p.handles = 2;
 });
 const savePlanSel = () => localStorage.setItem('gc-plan', JSON.stringify(planSel));
 
